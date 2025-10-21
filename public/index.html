@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>English Conversation — Whisper + Neural TTS (UK)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500&display=swap" rel="stylesheet">
+  <style>
+    :root{--bg:#f6fbff;--text:#1f2937;--muted:#6b7280;--accent:#4f46e5;--border:#e5e7eb}
+    *{box-sizing:border-box}
+    body{font-family:'Poppins',sans-serif;background:var(--bg);color:var(--text);max-width:900px;margin:40px auto;padding:0 18px}
+    h1{color:var(--accent);font-weight:500;text-align:center;margin:0 0 6px}
+    p{color:var(--muted);text-align:center;margin:0 0 18px}
+    #card{background:#fff;border:1px solid var(--border);border-radius:12px;padding:16px}
+    #log{background:#fff;border:1px solid var(--border);border-radius:12px;padding:14px;min-height:240px;max-height:520px;overflow-y:auto;white-space:pre-wrap;margin-bottom:12px}
+    .msg{margin:8px 0}.you{color:#111}.bot{color:#111}.sys{color:#6b7280}.err{color:#b91c1c}
+    textarea{width:100%;height:120px;padding:12px;border:1px solid var(--border);border-radius:12px;resize:none;font-family:'Poppins',sans-serif}
+    textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(79,70,229,.15)}
+    .row{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+    button{padding:12px 14px;background:var(--accent);color:#fff;border:none;border-radius:12px;cursor:pointer}
+    button:hover{background:#4338ca}
+    small{color:#6b7280}
+    .controls{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:10px 0}
+    select,input[type=range]{padding:8px;border:1px solid var(--border);border-radius:10px;background:#fff}
+    .spacer{flex:1}
+    .pill{padding:4px 8px;border:1px solid var(--border);border-radius:999px;font-size:12px}
+    .rec{background:#fee2e2;border-color:#fecaca;color:#b91c1c}
+    .ok{background:#dcfce7;border-color:#bbf7d0;color:#166534}
+  </style>
+</head>
+<body>
+  <h1>Savella English Conversation</h1>
+  <p>Practice your English and have interesting conversations</p>
+
+  <div id="card">
+    <div class="controls">
+      <div class="pill" id="recState">Ready</div>
+      <label for="speed"><small>Voice speed:</small></label>
+      <input id="speed" type="range" min="0.6" max="1.4" step="0.05" value="0.90" />
+      <small id="speedValue">0.90x</small>
+      <div class="spacer"></div>
+      <div>
+        <input id="autoListen" type="checkbox" checked />
+        <label for="autoListen"><small>Auto-mic after reply</small></label>
+      </div>
+    </div>
+
+    <div id="log"></div>
+
+    <div class="controls">
+      <small>Enter = send • Shift+Enter = newline</small>
+    </div>
+
+    <textarea id="q" placeholder="Type or tap Mic, then speak…"></textarea>
+
+    <div class="row">
+      <button id="send">Send</button>
+      <button id="mic">🎤 Tap to talk</button>
+      <button id="stop">⏹ Stop TTS</button>
+    </div>
+  </div>
+
+  <script>
+  window.onload = () => {
+    // Same-origin: works on Render + inside iframe (HTTPS)
+    const API_BASE = ''; // '' = same origin
+    
+    // SessionId (seu back já aceita isso)
+    let sessionId = localStorage.getItem('chatSessionId');
+
+    const log = document.getElementById('log');
+    const q = document.getElementById('q');
+    const btn = document.getElementById('send');
+    const micBtn = document.getElementById('mic');
+    const stopBtn = document.getElementById('stop');
+    const autoListenCb = document.getElementById('autoListen');
+    const recState = document.getElementById('recState');
+
+    // Speed control for neural TTS
+    const speedSlider = document.getElementById('speed');
+    const speedValue = document.getElementById('speedValue');
+    let speechRate = parseFloat(localStorage.getItem('speechRate')) || 0.9;
+    speedSlider.value = speechRate;
+    speedValue.textContent = speechRate.toFixed(2) + 'x';
+    speedSlider.oninput = () => {
+      speechRate = parseFloat(speedSlider.value);
+      speedValue.textContent = speechRate.toFixed(2) + 'x';
+      localStorage.setItem('speechRate', speechRate);
+      if (currentAudio) currentAudio.playbackRate = speechRate;
+    };
+
+    function addLine(text, cls){
+      const div = document.createElement('div');
+      div.className = 'msg ' + (cls || '');
+      div.textContent = text;
+      log.appendChild(div);
+      log.scrollTop = log.scrollHeight;
+    }
+
+    async function sendTextToBot(text){
+      addLine("You: " + text, "you");
+      addLine("Tutor: …", "bot");
+      const last = log.querySelector(".bot:last-child");
+      try{
+        const r = await fetch(API_BASE + "/ask", {
+          method:"POST",
+          headers:{ "Content-Type":"application/json" },
+          body: JSON.stringify({ 
+            message: text,
+            sessionId: sessionId
+          })
+        });
+        const data = await r.json().catch(()=> ({}));
+        if(!r.ok){
+          last.textContent = "Tutor: Error " + r.status + (data?.error? " — " + data.error : "");
+          last.classList.add("err");
+          return;
+        }
+        const ans = data.answer || data.message || "No response.";
+        if (data.sessionId) {
+          sessionId = data.sessionId;
+          localStorage.setItem('chatSessionId', sessionId);
+        }
+        last.textContent = "Tutor: " + ans;
+        speak(ans);
+      }catch(e){
+        last.textContent = "Tutor: Network error.";
+        last.classList.add("err");
+      }
+    }
+
+    async function sendMsg(){
+      const text = (q.value || "").trim();
+      if(!text) return;
+      q.value = "";
+      sendTextToBot(text);
+    }
+
+    // ====== Neural TTS (server /tts) ======
+    let currentAudio = null;
+    async function speak(text){
+      try{
+        const r = await fetch(`/tts?` + new URLSearchParams({ text }), { method: "GET" });
+        if(!r.ok){ console.error("TTS HTTP error:", r.status); return; }
+        const blob = await r.blob();
+        const url = URL.createObjectURL(blob);
+        if (currentAudio){
+          try{ currentAudio.pause(); }catch{}
+          try{ URL.revokeObjectURL(currentAudio._blobUrl); }catch{}
+          currentAudio = null;
+        }
+        const audio = new Audio(url);
+        audio.playbackRate = speechRate;
+        audio._blobUrl = url;
+        currentAudio = audio;
+
+        audio.onended = () => {
+          if (autoListenCb.checked) {
+            setTimeout(()=> startRecordingAuto(), 500);
+          }
+          try{ URL.revokeObjectURL(url); }catch{}
+          currentAudio = null;
+        };
+        await audio.play().catch(err => console.error("Audio play blocked:", err));
+      }catch(e){
+        console.error("TTS play error:", e);
+      }
+    }
+
+    stopBtn.onclick = () => {
+      try{ speechSynthesis.cancel(); }catch{}
+      if (currentAudio){
+        try{ currentAudio.pause(); }catch{}
+        try{ URL.revokeObjectURL(currentAudio._blobUrl); }catch{}
+        currentAudio = null;
+      }
+    };
+
+    // ====== Whisper Recorder: mic fica ligado até haver fala real ======
+    let mediaRecorder = null, chunks = [];
+    let recording = false;
+    let audioCtx = null, analyser = null, source = null;
+    let silenceTimer = null;
+
+    // VOX / VAD params
+    const SILENCE_MS = 2800;      // para só após ~2.8s de silêncio DEPOIS de fala real
+    const CHECK_EVERY = 120;      // checagem periódica
+    const THRESHOLD = 0.02;       // sensibilidade de voz (RMS)
+    const MIN_SPEECH_MS = 700;    // requer pelo menos ~0.7s de fala para considerar "fala real"
+
+    // Estado de detecção
+    let hasSpeech = false;        // já ouviu fala real desde que o mic abriu?
+    let speechStartedAt = 0;      // timestamp quando a fala começou
+    let belowSince = 0;           // tempo acumulado abaixo do threshold
+
+    function rmsFromAnalyser() {
+      if (!analyser) return 0;
+      const buf = new Float32Array(analyser.fftSize);
+      analyser.getFloatTimeDomainData(buf);
+      let sum = 0;
+      for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+      return Math.sqrt(sum / buf.length);
+    }
+
+    function startSilenceWatcher(){
+      stopSilenceWatcher();
+      belowSince = 0;
+      silenceTimer = setInterval(()=>{
+        const rms = rmsFromAnalyser();
+
+        if (rms >= THRESHOLD) {
+          // há voz no momento
+          belowSince = 0;
+          if (!hasSpeech) {
+            hasSpeech = true;
+            speechStartedAt = performance.now();
+          }
+        } else {
+          // silêncio no momento
+          if (hasSpeech) {
+            belowSince += CHECK_EVERY;
+            const spokenFor = performance.now() - speechStartedAt;
+            if (belowSince >= SILENCE_MS && spokenFor >= MIN_SPEECH_MS) {
+              // houve fala real + silêncio longo -> pode parar e enviar
+              stopRecording('end');
+            }
+          }
+          // se ainda não houve fala real, NÃO para: fica escutando indefinidamente
+        }
+      }, CHECK_EVERY);
+    }
+
+    function stopSilenceWatcher(){
+      if (silenceTimer){ clearInterval(silenceTimer); silenceTimer = null; }
+    }
+
+    async function startRecording(){
+      try{
+        const stream = await navigator.mediaDevices.getUserMedia({ audio:true });
+        mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+        chunks = [];
+        hasSpeech = false;
+        speechStartedAt = 0;
+        belowSince = 0;
+
+        // graph
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        source = audioCtx.createMediaStreamSource(stream);
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 2048;
+        source.connect(analyser);
+        startSilenceWatcher();
+
+        // só guardamos dados quando houver fala real (evita crescer memória no silêncio)
+        mediaRecorder.ondataavailable = e => {
+          if (e.data.size>0 && hasSpeech) chunks.push(e.data);
+        };
+
+        mediaRecorder.onstop = async () => {
+          recState.textContent = "Processing…";
+          recState.className = "pill";
+          try{
+            // Se não houve fala real, não envia nada e apenas fica pronto
+            if (!hasSpeech || chunks.length === 0) {
+              recState.textContent = "Ready";
+              recState.className = "pill";
+              return;
+            }
+            const blob = new Blob(chunks, { type:"audio/webm" });
+            const fd = new FormData();
+            fd.append("audio", blob, "speech.webm");
+            const r = await fetch(API_BASE + "/stt", { method:"POST", body: fd });
+            const data = await r.json();
+            if (!r.ok) throw new Error(data?.error || "STT error");
+            const text = (data.text||"").trim();
+            if (text) {
+              q.value = text;
+              await sendMsg();
+            } else {
+              // sem texto -> não diga nada, só fica pronto
+            }
+          }catch(err){
+            addLine("STT error: " + err.message, "err");
+          }finally{
+            recState.textContent = "Ready";
+            recState.className = "pill";
+          }
+        };
+
+        mediaRecorder.start();
+        recording = true;
+        recState.textContent = "Listening…";
+        recState.className = "pill rec";
+      }catch(err){
+        addLine("Mic permission error: " + err.message, "err");
+      }
+    }
+
+    function stopRecording(/* reason */){
+      if (!recording) return;
+      try{ mediaRecorder.stop(); }catch{}
+      recording = false;
+
+      // stop mic tracks
+      try{ mediaRecorder.stream.getTracks().forEach(t => t.stop()); }catch{}
+      // tear down audio graph
+      try{ stopSilenceWatcher(); }catch{}
+      try{ if (source) source.disconnect(); }catch{}
+      try{ if (analyser) analyser.disconnect(); }catch{}
+      try{ if (audioCtx) audioCtx.close(); }catch{}
+      source = analyser = audioCtx = null;
+    }
+
+    // Auto listen after TTS ends (sempre que marcado)
+    async function startRecordingAuto(){
+      try{
+        const ctx = new (window.AudioContext||window.webkitAudioContext)();
+        const o = ctx.createOscillator();
+        const g = ctx.createGain();
+        o.connect(g); g.connect(ctx.destination);
+        g.gain.value = 0; o.start(); o.stop(ctx.currentTime+0.01);
+        setTimeout(()=>ctx.close(), 150);
+      }catch{}
+      startRecording();
+    }
+
+    // UI
+    btn.onclick = sendMsg;
+    q.addEventListener("keydown", e => { if(e.key==="Enter" && !e.shiftKey){ e.preventDefault(); sendMsg(); } });
+
+    // Mic button: toggle manual
+    micBtn.onclick = () => {
+      if (recording) stopRecording();
+      else startRecording();
+    };
+
+    addLine("Tutor: Hello! What would you like to talk about today? 😊","bot");
+  };
+  </script>
+</body>
+</html>
